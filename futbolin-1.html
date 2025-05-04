@@ -239,6 +239,109 @@
         let totalQR = 0;
         let currentDate = new Date().toISOString().slice(0, 10); // Fecha actual en formato YYYY-MM-DD
         
+        // Cargar datos al iniciar la página
+        document.addEventListener('DOMContentLoaded', function() {
+            loadGithubConfig();
+            loadRecordsFromGithub();
+        });
+        
+        // Cargar registros desde GitHub
+        async function loadRecordsFromGithub() {
+            if (!isGithubConfigValid()) return;
+            
+            try {
+                const fileResponse = await fetch(`https://api.github.com/repos/${githubConfig.owner}/${githubConfig.repo}/contents/${githubConfig.filepath}`, {
+                    headers: {
+                        'Authorization': `token ${githubConfig.token}`,
+                        'Accept': 'application/vnd.github.v3+json'
+                    }
+                });
+                
+                if (!fileResponse.ok) {
+                    if (fileResponse.status === 404) {
+                        showGithubStatus('Archivo no encontrado. Se creará uno nuevo al guardar.', false);
+                    } else {
+                        showGithubStatus('Error al acceder al archivo', false);
+                    }
+                    return;
+                }
+                
+                const fileData = await fileResponse.json();
+                const content = decodeURIComponent(escape(atob(fileData.content)));
+                
+                // Parsear el contenido CSV
+                const lines = content.trim().split('\n');
+                
+                // Saltar la primera línea (encabezados)
+                if (lines.length > 1) {
+                    // Procesar cada línea de datos
+                    for (let i = 1; i < lines.length; i++) {
+                        const line = lines[i];
+                        
+                        // Saltar las líneas de cierre de día
+                        if (line.includes('--- CIERRE DE DÍA')) continue;
+                        if (line.trim() === '') continue;
+                        
+                        // Parsear los campos
+                        let fields = line.split(',');
+                        
+                        // Manejar comas dentro de comillas
+                        let parsedFields = [];
+                        let tempField = '';
+                        let inQuotes = false;
+                        
+                        for (let field of fields) {
+                            if (field.startsWith('"') && !inQuotes) {
+                                tempField = field.substring(1);
+                                inQuotes = true;
+                            } else if (field.endsWith('"') && inQuotes) {
+                                tempField += ',' + field.substring(0, field.length - 1);
+                                parsedFields.push(tempField);
+                                tempField = '';
+                                inQuotes = false;
+                            } else if (inQuotes) {
+                                tempField += ',' + field;
+                            } else {
+                                parsedFields.push(field);
+                            }
+                        }
+                        
+                        if (parsedFields.length >= 8) {
+                            const record = {
+                                date: parsedFields[0].replace(/"/g, ''),
+                                time: parsedFields[1].replace(/"/g, ''),
+                                counter: parseInt(parsedFields[2]),
+                                paymentMethod: parsedFields[3].replace(/"/g, ''),
+                                monto: parseFloat(parsedFields[4]),
+                                operation: parseFloat(parsedFields[5]),
+                                totalEfectivo: parseFloat(parsedFields[6]),
+                                totalQR: parseFloat(parsedFields[7])
+                            };
+                            
+                            // Agregar el registro a la lista
+                            records.push(record);
+                            
+                            // Actualizar el contador
+                            counter = Math.max(counter, record.counter + 1);
+                            
+                            // Actualizar los totales
+                            totalEfectivo = record.totalEfectivo;
+                            totalQR = record.totalQR;
+                        }
+                    }
+                    
+                    // Actualizar la interfaz de usuario
+                    counterElement.textContent = counter;
+                    updateRecordsTable();
+                    updateTotals();
+                    
+                    showGithubStatus(`Cargados ${records.length} registros de GitHub`, true);
+                }
+            } catch (error) {
+                showGithubStatus('Error al cargar registros: ' + error.message, false);
+            }
+        }
+        
         // Variables para GitHub
         let githubConfig = {
             owner: '',
@@ -276,6 +379,15 @@
                 
                 showGithubStatus('Configuración cargada desde local', true);
             }
+        }
+        
+        // Verificar si la configuración de GitHub es válida
+        function isGithubConfigValid() {
+            if (!githubConfig.owner || !githubConfig.repo || !githubConfig.filepath || !githubConfig.token) {
+                showGithubStatus('Configuración de GitHub incompleta. Por favor complete todos los campos.', false);
+                return false;
+            }
+            return true;
         }
         
         // Guardar configuración de GitHub
@@ -759,4 +871,52 @@
                 // Crear un nuevo nombre de archivo con la fecha del siguiente día
                 const nextDay = new Date();
                 nextDay.setDate(nextDay.getDate() + 1);
-                const nextDayString = nextDay.toISOString().slice(0,
+                const nextDayString = nextDay.toISOString().slice(0, 10);
+                
+                // Extraer el directorio y nombre de archivo de la ruta actual
+                const lastSlashIndex = githubConfig.filepath.lastIndexOf('/');
+                let directory = '';
+                let filename = githubConfig.filepath;
+                
+                if (lastSlashIndex > -1) {
+                    directory = githubConfig.filepath.substring(0, lastSlashIndex + 1);
+                    filename = githubConfig.filepath.substring(lastSlashIndex + 1);
+                }
+                
+                // Crear un nuevo nombre de archivo que incluya la fecha
+                const filenameWithoutExtension = filename.split('.')[0];
+                const extension = filename.split('.').pop();
+                const newFilename = `${filenameWithoutExtension}_${nextDayString}.${extension}`;
+                const newFilepath = directory + newFilename;
+                
+                // Crear el nuevo archivo con encabezado
+                const headerContent = "Fecha,Hora,N° Registro,Método Pago,Monto (Bs.),Operación,Total Efectivo,Total QR\n";
+                
+                const createResponse = await fetch(`https://api.github.com/repos/${githubConfig.owner}/${githubConfig.repo}/contents/${newFilepath}`, {
+                    method: 'PUT',
+                    headers: {
+                        'Authorization': `token ${githubConfig.token}`,
+                        'Accept': 'application/vnd.github.v3+json',
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        message: `Creación del archivo de registros para ${nextDayString}`,
+                        content: btoa(unescape(encodeURIComponent(headerContent)))
+                    })
+                });
+                
+                if (createResponse.ok) {
+                    // Actualizar la ruta del archivo para el siguiente día
+                    githubConfig.filepath = newFilepath;
+                    localStorage.setItem('githubConfig', JSON.stringify(githubConfig));
+                    document.getElementById('filePath').value = newFilepath;
+                    
+                    showGithubStatus(`Nuevo archivo creado para ${nextDayString}`, true);
+                } else {
+                    const errorData = await createResponse.json();
+                    showGithubStatus(`Error al crear nuevo archivo: ${errorData.message}`, false);
+                }
+            } catch (error) {
+                showGithubStatus('Error al crear nuevo archivo: ' + error.message, false);
+            }
+        }
